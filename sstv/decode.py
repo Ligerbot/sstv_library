@@ -1,5 +1,5 @@
 """Class and methods to decode SSTV signal"""
-
+import matplotlib.pyplot as plt
 import numpy as np
 import soundfile
 from PIL import Image
@@ -42,6 +42,10 @@ class SSTVDecoder(object):
 
         self._audio_file = audio_file
 
+        self._fig = None
+        self._ax = None
+        self._img_display = None
+
         self._samples, self._sample_rate = soundfile.read(self._audio_file)
 
         if self._samples.ndim > 1:  # convert to mono if stereo
@@ -74,7 +78,29 @@ class SSTVDecoder(object):
 
         vis_end = header_end + round(spec.VIS_BIT_SIZE * 9 * self._sample_rate)
 
-        image_data = self._decode_image_data(vis_end)
+#        image_data = self._decode_image_data(vis_end)
+
+        return self._decode_image_data(vis_end)
+
+    def decode_stream(self, skip=0.0):
+        """Attempts to decode the audio data as an SSTV signal
+
+        Returns a PIL image on success, and None if no SSTV signal was found
+        """
+
+        if skip > 0.0:
+            self._samples = self._samples[round(skip * self._sample_rate):]
+
+        header_end = self._find_header()
+
+        if header_end is None:
+            return None
+
+        self.mode = self._decode_vis(header_end)
+
+        vis_end = header_end + round(spec.VIS_BIT_SIZE * 9 * self._sample_rate)
+
+        image_data = self._decode_image_data_stream(vis_end)
 
         return self._draw_image(image_data)
 
@@ -253,6 +279,94 @@ class SSTVDecoder(object):
                     if seq_start is None:
                         log_message()
                         log_message("Reached end of audio whilst decoding.")
+#                        if self._preview.mode != "RGB":
+#                            return self._preview.convert("RGB")
+#                        return self._preview
+                        return Image.fromarray(self._preview, "RGB")
+                pixel_time = self.mode.PIXEL_TIME
+                if self.mode.HAS_HALF_SCAN:
+                    # Robot mode has half-length second/third scans
+                    if chan > 0:
+                        pixel_time = self.mode.HALF_PIXEL_TIME
+
+                    centre_window_time = (pixel_time * window_factor) / 2
+                    pixel_window = round(centre_window_time * 2 *
+                                         self._sample_rate)
+
+                for px in range(width):
+
+                    chan_offset = self.mode.CHAN_OFFSETS[chan]
+
+                    px_pos = round(seq_start + (chan_offset + px *
+                                   pixel_time - centre_window_time) *
+                                   self._sample_rate)
+                    px_end = px_pos + pixel_window
+
+                    # If we are performing fft past audio length, stop early
+                    if px_end >= len(self._samples):
+                        log_message()
+                        log_message("Reached end of audio whilst decoding.")
+                        return image_data
+
+                    pixel_area = self._samples[px_pos:px_end]
+                    freq = self._peak_fft_freq(pixel_area)
+
+                    image_data[line][chan][px] = calc_lum(freq)
+
+            self._draw_line(image_data, line)
+            progress_bar(line, height - 1, "Decoding image...")
+        plt.ioff()
+        plt.show(block=True)
+        img = Image.fromarray(self._preview, "RGB")
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        return img
+
+#        if self._preview.mode != "RGB":
+#            return self._preview.convert("RGB")
+#        return self._preview
+    def _decode_image_data_stream(self, image_start):
+        """Decodes image from the transmission section of an sstv signal"""
+
+        window_factor = self.mode.WINDOW_FACTOR
+        centre_window_time = (self.mode.PIXEL_TIME * window_factor) / 2
+        pixel_window = round(centre_window_time * 2 * self._sample_rate)
+
+        height = self.mode.LINE_COUNT
+        channels = self.mode.CHAN_COUNT
+        width = self.mode.LINE_WIDTH
+        # Use list comprehension to init list so we can return data early
+        image_data = [[[0 for i in range(width)]
+                       for j in range(channels)] for k in range(height)]
+
+        seq_start = image_start
+        if self.mode.HAS_START_SYNC:
+            # Start at the end of the initial sync pulse
+            seq_start = self._align_sync(image_start, start_of_sync=False)
+            if seq_start is None:
+                raise EOFError("Reached end of audio before image data")
+
+        for line in range(height):
+
+            if self.mode.CHAN_SYNC > 0 and line == 0:
+                # Align seq_start to the beginning of the previous sync pulse
+                sync_offset = self.mode.CHAN_OFFSETS[self.mode.CHAN_SYNC]
+                seq_start -= round((sync_offset + self.mode.SCAN_TIME)
+                                   * self._sample_rate)
+
+            for chan in range(channels):
+
+                if chan == self.mode.CHAN_SYNC:
+                    if line > 0 or chan > 0:
+                        # Set base offset to the next line
+                        seq_start += round(self.mode.LINE_TIME *
+                                           self._sample_rate)
+
+                    # Align to start of sync pulse
+                    seq_start = self._align_sync(seq_start)
+                    if seq_start is None:
+                        log_message()
+                        log_message("Reached end of audio whilst decoding.")
                         return image_data
 
                 pixel_time = self.mode.PIXEL_TIME
@@ -284,10 +398,53 @@ class SSTVDecoder(object):
                     freq = self._peak_fft_freq(pixel_area)
 
                     image_data[line][chan][px] = calc_lum(freq)
+#                    image_data.show()
 
             progress_bar(line, height - 1, "Decoding image...")
 
         return image_data
+    def _draw_line(self, image_data, line):
+        print(f"Drawing line {line}")
+        """Sets up the live preview window and draws one line as it is decoded"""
+
+        width = self.mode.LINE_WIDTH
+        height = self.mode.LINE_COUNT
+        channels = self.mode.CHAN_COUNT
+        odd_line = line % 2
+
+        if self._fig is None:
+            plt.ion()
+            self._fig, self._ax = plt.subplots()
+            self._preview = np.zeros((height, width, 3), dtype=np.uint8)
+            self._img_display = self._ax.imshow(self._preview)
+
+        for x in range(width):
+            if channels == 2:
+                if self.mode.HAS_ALT_SCAN:
+                    if self.mode.COLOR == spec.COL_FMT.YUV:
+                        pixel = (image_data[line][0][x],
+                                 image_data[line-(odd_line-1)][1][x],
+                                 image_data[line-odd_line][1][x])
+            elif channels == 3:
+                if self.mode.COLOR == spec.COL_FMT.GBR:
+                    pixel = (image_data[line][2][x],
+                             image_data[line][0][x],
+                             image_data[line][1][x])
+                elif self.mode.COLOR == spec.COL_FMT.YUV:
+                    pixel = (image_data[line][0][x],
+                             image_data[line][2][x],
+                             image_data[line][1][x])
+                elif self.mode.COLOR == spec.COL_FMT.RGB:
+                    pixel = (image_data[line][0][x],
+                             image_data[line][1][x],
+                             image_data[line][2][x])
+            self._preview[line, x] = pixel
+
+        self._img_display.set_data(self._preview)
+        self._fig.canvas.flush_events()
+        self._fig.canvas.draw()
+#        self._fig.canvas.draw_idle()
+        plt.pause(0.0001)
 
     def _draw_image(self, image_data):
         """Renders the image from the decoded sstv signal"""
@@ -306,6 +463,12 @@ class SSTVDecoder(object):
         pixel_data = image.load()
 
         log_message("Drawing image data...")
+
+        import matplotlib.pyplot as plt
+
+        plt.ion()  # Turn on interactive mode
+        fig, ax = plt.subplots()
+        img_display = ax.imshow(image)
 
         for y in range(height):
 
@@ -339,7 +502,9 @@ class SSTVDecoder(object):
                                  image_data[y][2][x])
 
                 pixel_data[x, y] = pixel
-
+            img_display.set_data(image)  # Update the display data
+            fig.canvas.draw()
+            fig.canvas.flush_events()
         if image.mode != "RGB":
             image = image.convert("RGB")
 
