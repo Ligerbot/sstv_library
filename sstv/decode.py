@@ -1,3 +1,4 @@
+import time
 """Class and methods to decode SSTV signal"""
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,6 +44,7 @@ class SSTVDecoder(object):
         self._audio_file = audio_file
 
         self._fig = None
+        self._lines_drawn = 0
         self._ax = None
         self._img_display = None
 
@@ -70,7 +72,9 @@ class SSTVDecoder(object):
             self._samples = self._samples[round(skip * self._sample_rate):]
 
         header_end = self._find_header()
-
+#        self._header_end = header_end
+        if header_end is not None:
+            self._header_end = header_end
         if header_end is None:
             return None
 
@@ -221,7 +225,13 @@ class SSTVDecoder(object):
         align_stop = len(self._samples) - sync_window
 
         if align_stop <= align_start:
-            return None  # Reached end of audio
+            while align_stop <= align_start:
+                new_samples, self._sample_rate = soundfile.read("live_stream.wav")
+                if len(new_samples) > len(self._samples):
+                    self._samples = new_samples.astype('float32')
+                align_stop = len(self._samples) - sync_window
+                time.sleep(0.1)
+#            return None  # Reached end of audio
 
         for current_sample in range(align_start, align_stop):
             section_end = current_sample + sync_window
@@ -303,10 +313,21 @@ class SSTVDecoder(object):
                     px_end = px_pos + pixel_window
 
                     # If we are performing fft past audio length, stop early
+#                    if px_end >= len(self._samples):
+ #                       log_message()
+  #                      log_message("Reached end of audio whilst decoding.")
+   #                     return image_data
+
                     if px_end >= len(self._samples):
-                        log_message()
-                        log_message("Reached end of audio whilst decoding.")
-                        return image_data
+                        while px_end >= len(self._samples):
+                            import soundfile
+                            import numpy
+                            new_samples, self._sample_rate = soundfile.read("live_stream.wav")
+                            if len(new_samples) > len(self._samples):
+                                self._samples = new_samples.astype('float32')
+                            time.sleep(0.1)
+#                            self._samples, self._sample_rate = soundfile.read("live_stream.wav")
+#                            time.sleep(0.1)
 
                     pixel_area = self._samples[px_pos:px_end]
                     freq = self._peak_fft_freq(pixel_area)
@@ -316,7 +337,7 @@ class SSTVDecoder(object):
             self._draw_line(image_data, line)
             progress_bar(line, height - 1, "Decoding image...")
         plt.ioff()
-        plt.show(block=True)
+#        plt.show(block=True)
         img = Image.fromarray(self._preview, "RGB")
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -389,10 +410,21 @@ class SSTVDecoder(object):
                     px_end = px_pos + pixel_window
 
                     # If we are performing fft past audio length, stop early
+#                    if px_end >= len(self._samples):
+ #                       log_message()
+  #                      log_message("Reached end of audio whilst decoding.")
+   #                     return image_data
                     if px_end >= len(self._samples):
-                        log_message()
-                        log_message("Reached end of audio whilst decoding.")
-                        return image_data
+                        while px_end >= len(self._samples):
+                            import soundfile
+                            import numpy
+                            new_samples, self._sample_rate = soundfile.read("live_stream.wav")
+                            if len(new_samples) > len(self._samples):
+                                self._samples = new_samples.astype('float32')
+                            time.sleep(0.1)
+#                            self._samples, self._sample_rate = soundfile.read("live_stream.wav")
+#                            time.sleep(0.1)
+
 
                     pixel_area = self._samples[px_pos:px_end]
                     freq = self._peak_fft_freq(pixel_area)
@@ -404,6 +436,9 @@ class SSTVDecoder(object):
 
         return image_data
     def _draw_line(self, image_data, line):
+        if line < self._lines_drawn:
+            return
+        self._lines_drawn = line + 1
         print(f"Drawing line {line}")
         """Sets up the live preview window and draws one line as it is decoded"""
 
